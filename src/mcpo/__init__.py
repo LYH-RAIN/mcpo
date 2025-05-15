@@ -1,138 +1,90 @@
-import sys
-import asyncio
 import typer
+from typing import List, Optional
 import os
-from dotenv import load_dotenv
-
-from typing_extensions import Annotated
-from typing import Optional, List
+from pathlib import Path
 
 app = typer.Typer()
 
 
-@app.command(context_settings={"allow_extra_args": True})
+@app.command()
 def main(
-    host: Annotated[
-        Optional[str], typer.Option("--host", "-h", help="Host address")
-    ] = "0.0.0.0",
-    port: Annotated[
-        Optional[int], typer.Option("--port", "-p", help="Port number")
-    ] = 8000,
-    cors_allow_origins: Annotated[
-        Optional[List[str]],
-        typer.Option("--cors-allow-origins", help="CORS allowed origins"),
-    ] = ["*"],
-    api_key: Annotated[
-        Optional[str],
-        typer.Option("--api-key", "-k", help="API key for authentication"),
-    ] = None,
-    strict_auth: Annotated[
-        Optional[bool],
-        typer.Option("--strict-auth", help="API key protects all endpoints and documentation"),
-    ] = False,
-    env: Annotated[
-        Optional[List[str]], typer.Option("--env", "-e", help="Environment variables")
-    ] = None,
-    env_path: Annotated[
-        Optional[str],
-        typer.Option("--env-path", help="Path to environment variables file"),
-    ] = None,
-    server_type: Annotated[
-        Optional[str], typer.Option("--type", "--server-type", help="Server type")
-    ] = "stdio",
-    config_path: Annotated[
-        Optional[str], typer.Option("--config", "-c", help="Config file path")
-    ] = None,
-    name: Annotated[
-        Optional[str], typer.Option("--name", "-n", help="Server name")
-    ] = None,
-    description: Annotated[
-        Optional[str], typer.Option("--description", "-d", help="Server description")
-    ] = None,
-    version: Annotated[
-        Optional[str], typer.Option("--version", "-v", help="Server version")
-    ] = None,
-    ssl_certfile: Annotated[
-        Optional[str], typer.Option("--ssl-certfile", "-t", help="SSL certfile")
-    ] = None,
-    ssl_keyfile: Annotated[
-        Optional[str], typer.Option("--ssl-keyfile", "-K", help="SSL keyfile")
-    ] = None,
-    path_prefix: Annotated[
-        Optional[str], typer.Option("--path-prefix", help="URL prefix")
-    ] = None,
+        host: str = typer.Option("0.0.0.0", help="Host to bind to"),
+        port: int = typer.Option(8000, help="Port to bind to"),
+        api_key: Optional[str] = typer.Option(None, help="API key for authentication"),
+        config: Optional[Path] = typer.Option(None, help="Path to config file"),
+        server_command: Optional[List[str]] = typer.Option(None, help="MCP server command"),
+        server_type: Optional[str] = typer.Option(None, help="MCP server type (stdio, sse, streamablehttp)"),
+        ssl_certfile: Optional[str] = typer.Option(None, help="SSL certificate file"),
+        ssl_keyfile: Optional[str] = typer.Option(None, help="SSL key file"),
+        path_prefix: Optional[str] = typer.Option("/", help="Path prefix for API endpoints"),
+        workers: Optional[int] = typer.Option(None, help="Number of worker processes (0 for auto)"),
+        multi_worker: bool = typer.Option(False, help="Use multi-worker mode with uvicorn"),
 ):
-    server_command = None
-    if not config_path:
-        # Find the position of "--"
-        if "--" not in sys.argv:
-            typer.echo("Usage: mcpo --host 0.0.0.0 --port 8000 -- your_mcp_command")
-            raise typer.Exit(1)
+    """
+    Start the MCPO server.
+    """
+    # 如果指定了多worker模式
+    if multi_worker or os.environ.get("MCPO_MULTI_WORKER", "").lower() in ("true", "1", "yes"):
+        from mcpo.server import run_server
 
-        idx = sys.argv.index("--")
-        server_command: List[str] = sys.argv[idx + 1 :]
+        # 确定worker数量
+        if workers is None:
+            if os.environ.get("WORKERS_AUTO", "").lower() in ("true", "1", "yes"):
+                workers = 0  # 自动计算
+            else:
+                try:
+                    workers = int(os.environ.get("WORKERS", "0"))
+                except (ValueError, TypeError):
+                    workers = 0
 
-        if not server_command:
-            typer.echo("Error: You must specify the MCP server command after '--'")
-            return
+        # 保存配置到环境变量
+        if api_key:
+            os.environ["API_KEY"] = api_key
+        if config:
+            os.environ["CONFIG_PATH"] = str(config)
+        if server_type:
+            os.environ["SERVER_TYPE"] = server_type
+        if server_command:
+            os.environ["SERVER_COMMAND"] = " ".join(server_command)
 
-    from mcpo.main import run
-
-    if config_path:
-        print("Starting MCP OpenAPI Proxy with config file:", config_path)
-    else:
-        print(
-            f"Starting MCP OpenAPI Proxy on {host}:{port} with command: {' '.join(server_command)}"
-        )
-
-    try:
-        env_dict = {}
-        if env:
-            for var in env:
-                key, value = var.split("=", 1)
-                env_dict[key] = value
-
-        if env_path:
-            # Load environment variables from the specified file
-            load_dotenv(env_path)
-            env_dict.update(dict(os.environ))
-
-        # Set environment variables
-        for key, value in env_dict.items():
-            os.environ[key] = value
-    except Exception as e:
-        pass
-
-    # Whatever the prefix is, make sure it starts and ends with a /
-    if path_prefix is None:
-        # Set default value
-        path_prefix = "/"
-    # if prefix doesn't end with a /, add it
-    if not path_prefix.endswith("/"):
-        path_prefix = f"{path_prefix}/"
-    # if prefix doesn't start with a /, add it
-    if not path_prefix.startswith("/"):
-        path_prefix = f"/{path_prefix}"
-
-    # Run your async run function from mcpo.main
-    asyncio.run(
-        run(
-            host,
-            port,
-            api_key=api_key,
-            strict_auth=strict_auth,
-            cors_allow_origins=cors_allow_origins,
-            server_type=server_type,
-            config_path=config_path,
-            name=name,
-            description=description,
-            version=version,
-            server_command=server_command,
+        # 启动多worker服务器
+        run_server(
+            app="mcpo.main:create_app",
+            host=host,
+            port=port,
+            workers=workers if workers > 0 else None,
             ssl_certfile=ssl_certfile,
             ssl_keyfile=ssl_keyfile,
-            path_prefix=path_prefix,
+            log_level="info"
         )
-    )
+    else:
+        # 传统单worker模式
+        import asyncio
+        from mcpo.main import run
+
+        kwargs = {}
+        if config:
+            kwargs["config_path"] = str(config)
+        if server_command:
+            kwargs["server_command"] = server_command
+        if server_type:
+            kwargs["server_type"] = server_type
+        if ssl_certfile:
+            kwargs["ssl_certfile"] = ssl_certfile
+        if ssl_keyfile:
+            kwargs["ssl_keyfile"] = ssl_keyfile
+        if path_prefix:
+            kwargs["path_prefix"] = path_prefix
+
+        # 运行单worker服务器
+        asyncio.run(
+            run(
+                host=host,
+                port=port,
+                api_key=api_key,
+                **kwargs
+            )
+        )
 
 
 if __name__ == "__main__":

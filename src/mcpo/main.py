@@ -16,12 +16,13 @@ from starlette.routing import Mount
 
 logger = logging.getLogger(__name__)
 
-
 from mcpo.utils.main import get_model_fields, get_tool_handler
 from mcpo.utils.auth import get_verify_api_key, APIKeyMiddleware
 
 
 async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
+    # 现有代码保持不变
+    # ...
     session: ClientSession = app.state.session
     if not session:
         raise ValueError("Session is not initialized in the app state.")
@@ -79,6 +80,8 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 现有代码保持不变
+    # ...
     server_type = getattr(app.state, "server_type", "stdio")
     command = getattr(app.state, "command", None)
     args = getattr(app.state, "args", [])
@@ -88,7 +91,7 @@ async def lifespan(app: FastAPI):
     api_dependency = getattr(app.state, "api_dependency", None)
 
     if (server_type == "stdio" and not command) or (
-        server_type == "sse" and not args[0]
+            server_type == "sse" and not args[0]
     ):
         # Main app lifespan (when config_path is provided)
         async with AsyncExitStack() as stack:
@@ -113,8 +116,8 @@ async def lifespan(app: FastAPI):
                     yield
         if server_type == "sse":
             async with sse_client(url=args[0]) as (
-                reader,
-                writer,
+                    reader,
+                    writer,
             ):
                 async with ClientSession(reader, writer) as session:
                     app.state.session = session
@@ -128,9 +131,9 @@ async def lifespan(app: FastAPI):
 
             # Connect using streamablehttp_client from the SDK, similar to sse_client
             async with streamablehttp_client(url=url) as (
-                reader,
-                writer,
-                _,  # get_session_id callback not needed for ClientSession
+                    reader,
+                    writer,
+                    _,  # get_session_id callback not needed for ClientSession
             ):
                 async with ClientSession(reader, writer) as session:
                     app.state.session = session
@@ -138,55 +141,37 @@ async def lifespan(app: FastAPI):
                     yield
 
 
-async def run(
-    host: str = "127.0.0.1",
-    port: int = 8000,
-    api_key: Optional[str] = "",
-    cors_allow_origins=["*"],
-    **kwargs,
-):
-    # Server API Key
-    api_dependency = get_verify_api_key(api_key) if api_key else None
-    strict_auth = kwargs.get("strict_auth", False)
-
-    # MCP Server
-    server_type = kwargs.get(
-        "server_type"
-    )  # "stdio", "sse", or "streamablehttp" ("streamable_http" is also accepted)
+def create_app(**kwargs):
+    """创建FastAPI应用实例，为多worker模式服务"""
+    # 从环境变量或kwargs获取配置
+    host = kwargs.get("host", "127.0.0.1")
+    port = kwargs.get("port", 8000)
+    api_key = kwargs.get("api_key", os.environ.get("API_KEY", ""))
+    cors_allow_origins = kwargs.get("cors_allow_origins", ["*"])
+    server_type = kwargs.get("server_type")
     server_command = kwargs.get("server_command")
-
-    # MCP Config
-    config_path = kwargs.get("config_path")
-
-    # mcpo server
-    name = kwargs.get("name") or "MCP OpenAPI Proxy"
-    description = (
-        kwargs.get("description") or "Automatically generated API from MCP Tool Schemas"
-    )
-    version = kwargs.get("version") or "1.0"
-
+    config_path = kwargs.get("config_path", os.environ.get("CONFIG_PATH"))
+    name = kwargs.get("name", "MCP OpenAPI Proxy")
+    description = kwargs.get("description", "Automatically generated API from MCP Tool Schemas")
+    version = kwargs.get("version", "1.0")
     ssl_certfile = kwargs.get("ssl_certfile")
     ssl_keyfile = kwargs.get("ssl_keyfile")
-    path_prefix = kwargs.get("path_prefix") or "/"
+    path_prefix = kwargs.get("path_prefix", "/")
+    strict_auth = kwargs.get("strict_auth", False)
 
-    # Configure basic logging
+    # 配置日志
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
-    logger.info("Starting MCPO Server...")
+    logger.info("Creating MCPO Application...")
     logger.info(f"  Name: {name}")
     logger.info(f"  Version: {version}")
-    logger.info(f"  Description: {description}")
-    logger.info(f"  Hostname: {socket.gethostname()}")
-    logger.info(f"  Port: {port}")
     logger.info(f"  API Key: {'Provided' if api_key else 'Not Provided'}")
-    logger.info(f"  CORS Allowed Origins: {cors_allow_origins}")
-    if ssl_certfile:
-        logger.info(f"  SSL Certificate File: {ssl_certfile}")
-    if ssl_keyfile:
-        logger.info(f"  SSL Key File: {ssl_keyfile}")
-    logger.info(f"  Path Prefix: {path_prefix}")
 
+    # 创建API依赖
+    api_dependency = get_verify_api_key(api_key) if api_key else None
+
+    # 创建主应用
     main_app = FastAPI(
         title=name,
         description=description,
@@ -204,10 +189,11 @@ async def run(
         allow_headers=["*"],
     )
 
-    # Add middleware to protect also documentation and spec
+    # 添加中间件以保护文档和规范
     if api_key and strict_auth:
         main_app.add_middleware(APIKeyMiddleware, api_key=api_key)
 
+    # 配置服务器
     if server_type == "sse":
         logger.info(
             f"Configuring for a single SSE MCP Server with URL {server_command[0]}"
@@ -253,14 +239,14 @@ async def run(
                     f"  Configuring Stdio MCP Server '{server_name_cfg}' with command: {server_cfg_details['command']}{args_info}"
                 )
             elif server_cfg_details.get("type") == "sse" and server_cfg_details.get(
-                "url"
+                    "url"
             ):
                 logger.info(
                     f"  Configuring SSE MCP Server '{server_name_cfg}' with URL: {server_cfg_details['url']}"
                 )
             elif (
-                server_cfg_details.get("type") == "streamablehttp"
-                or server_cfg_details.get("type") == "streamable_http"
+                    server_cfg_details.get("type") == "streamablehttp"
+                    or server_cfg_details.get("type") == "streamable_http"
             ) and server_cfg_details.get("url"):
                 logger.info(
                     f"  Configuring StreamableHTTP MCP Server '{server_name_cfg}' with URL: {server_cfg_details['url']}"
@@ -303,8 +289,8 @@ async def run(
                 sub_app.state.server_type = "sse"
                 sub_app.state.args = server_cfg["url"]
             elif (
-                server_config_type == "streamablehttp"
-                or server_config_type == "streamable_http"
+                    server_config_type == "streamablehttp"
+                    or server_config_type == "streamable_http"
             ) and server_cfg.get("url"):
                 # Store the URL with trailing slash to avoid redirects
                 url = server_cfg["url"]
@@ -313,7 +299,7 @@ async def run(
                 sub_app.state.server_type = "streamablehttp"
                 sub_app.state.args = url
             elif not server_config_type and server_cfg.get(
-                "url"
+                    "url"
             ):  # Fallback for old SSE config
                 sub_app.state.server_type = "sse"
                 sub_app.state.args = server_cfg["url"]
@@ -330,13 +316,33 @@ async def run(
         logger.error("MCPO server_command or config_path must be provided.")
         raise ValueError("You must provide either server_command or config.")
 
-    logger.info("Uvicorn server starting...")
-    config = uvicorn.Config(
-        app=main_app,
+    return main_app
+
+
+# 保留原始的run函数，但将其作为单worker模式的入口点
+async def run(
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        api_key: Optional[str] = "",
+        cors_allow_origins=["*"],
+        **kwargs,
+):
+    """单worker模式的入口点，保持向后兼容性"""
+    app = create_app(
         host=host,
         port=port,
-        ssl_certfile=ssl_certfile,
-        ssl_keyfile=ssl_keyfile,
+        api_key=api_key,
+        cors_allow_origins=cors_allow_origins,
+        **kwargs
+    )
+
+    logger.info("Uvicorn server starting in single-worker mode...")
+    config = uvicorn.Config(
+        app=app,
+        host=host,
+        port=port,
+        ssl_certfile=kwargs.get("ssl_certfile"),
+        ssl_keyfile=kwargs.get("ssl_keyfile"),
         log_level="info",
     )
     server = uvicorn.Server(config)
