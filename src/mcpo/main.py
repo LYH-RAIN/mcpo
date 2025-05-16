@@ -2,16 +2,18 @@ import json
 import os
 import logging
 import socket
+import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Optional
 
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,21 @@ logger = logging.getLogger(__name__)
 from mcpo.utils.main import get_model_fields, get_tool_handler
 from mcpo.utils.auth import get_verify_api_key, APIKeyMiddleware
 
+
+# 添加中间件来识别请求的worker
+# 生成一个唯一的worker ID
+WORKER_ID = str(uuid.uuid4())[:8]
+# 获取主机名，用于标识worker
+HOSTNAME = socket.gethostname()
+
+# 使用标准的BaseHTTPMiddleware实现worker标识中间件
+class WorkerIdentificationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # 添加标识worker的头部
+        response.headers["X-Worker-ID"] = WORKER_ID
+        response.headers["X-Worker-Hostname"] = HOSTNAME
+        return response
 
 async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
     # 现有代码保持不变
@@ -180,6 +197,7 @@ def create_app(**kwargs):
         ssl_keyfile=ssl_keyfile,
         lifespan=lifespan,
     )
+    main_app.middleware("http")(WorkerIdentificationMiddleware())
 
     main_app.add_middleware(
         CORSMiddleware,
@@ -268,6 +286,7 @@ def create_app(**kwargs):
                 version="1.0",
                 lifespan=lifespan,
             )
+            sub_app.middleware("http")(WorkerIdentificationMiddleware())
 
             sub_app.add_middleware(
                 CORSMiddleware,
