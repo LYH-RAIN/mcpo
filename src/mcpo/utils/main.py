@@ -53,6 +53,107 @@ def process_tool_response(result: CallToolResult) -> list:
     return response
 
 
+def adapt_response_to_model(response_data, response_model, endpoint_name):
+    """
+    尝试将响应数据适配到预期的模型格式
+
+    Args:
+        response_data: 实际的响应数据
+        response_model: 预期的响应模型
+        endpoint_name: 端点名称
+
+    Returns:
+        适配后的响应数据
+    """
+    # 如果响应模型是 Any，直接返回
+    if response_model == Any:
+        return response_data
+
+    try:
+        # 获取模型的类型信息
+        model_origin = getattr(response_model, '__origin__', None)
+        model_args = getattr(response_model, '__args__', ())
+
+        # 处理 List[str] 类型
+        if model_origin is list and len(model_args) == 1 and model_args[0] is str:
+            if isinstance(response_data, list):
+                adapted_list = []
+                for item in response_data:
+                    if isinstance(item, dict):
+                        # 智能提取字符串表示
+                        if 'name' in item:
+                            adapted_list.append(item['name'])
+                        elif 'fullname' in item:
+                            adapted_list.append(item['fullname'])
+                        elif 'id' in item:
+                            adapted_list.append(str(item['id']))
+                        elif 'title' in item:
+                            adapted_list.append(item['title'])
+                        else:
+                            # 尝试找到第一个字符串值
+                            string_values = [v for v in item.values() if isinstance(v, str)]
+                            if string_values:
+                                adapted_list.append(string_values[0])
+                            else:
+                                # 使用 JSON 字符串作为 fallback
+                                adapted_list.append(json.dumps(item, ensure_ascii=False))
+                    else:
+                        adapted_list.append(str(item))
+
+                logger.info(f"Adapted {endpoint_name} response from List[dict] to List[str]: {len(adapted_list)} items")
+                return adapted_list
+
+        # 处理 List[dict] 类型 - 保持原样
+        elif model_origin is list and len(model_args) == 1:
+            if isinstance(response_data, list):
+                return response_data
+
+        # 处理单个字符串类型
+        elif response_model is str:
+            if isinstance(response_data, dict):
+                # 尝试提取主要字符串字段
+                if 'name' in response_data:
+                    return response_data['name']
+                elif 'title' in response_data:
+                    return response_data['title']
+                elif 'message' in response_data:
+                    return response_data['message']
+                else:
+                    return json.dumps(response_data, ensure_ascii=False)
+            else:
+                return str(response_data)
+
+        # 处理单个字典类型
+        elif hasattr(response_model, '__annotations__'):
+            # 这是一个 Pydantic 模型
+            if isinstance(response_data, dict):
+                return response_data
+
+        # 针对特定端点的特殊处理
+        if endpoint_name == "list_jobs" and isinstance(response_data, list):
+            # Jenkins list_jobs 特殊处理
+            adapted_list = []
+            for item in response_data:
+                if isinstance(item, dict):
+                    if 'name' in item:
+                        adapted_list.append(item['name'])
+                    elif 'fullname' in item:
+                        adapted_list.append(item['fullname'])
+                    else:
+                        adapted_list.append(json.dumps(item, ensure_ascii=False))
+                else:
+                    adapted_list.append(str(item))
+            logger.info(f"Applied Jenkins-specific adaptation for {endpoint_name}: {len(adapted_list)} jobs")
+            return adapted_list
+
+    except Exception as e:
+        logger.warning(f"Failed to adapt response for {endpoint_name}: {e}")
+
+    # 如果适配失败，返回原始数据
+    logger.debug(f"No adaptation applied for {endpoint_name}, returning original data")
+    return response_data
+
+
 def name_needs_alias(name: str) -> bool:
     """Check if a field name needs aliasing (for now if it starts with '__')."""
     return name.startswith('__')
@@ -363,11 +464,16 @@ def get_tool_handler(
 
     if form_model_fields:
         FormModel = create_model(f"{endpoint_name}_form_model", **form_model_fields)
-        ResponseModel = (
-            create_model(f"{endpoint_name}_response_model", **response_model_fields)
-            if response_model_fields
-            else Any
-        )
+
+        # 创建响应模型，但允许运行时适配
+        if response_model_fields:
+            try:
+                ResponseModel = create_model(f"{endpoint_name}_response_model", **response_model_fields)
+            except Exception as e:
+                logger.warning(f"Failed to create response model for {endpoint_name}: {e}")
+                ResponseModel = Any
+        else:
+            ResponseModel = Any
 
         def make_endpoint_func(
                 endpoint_name: str, FormModel, session: ClientSession
@@ -396,6 +502,12 @@ def get_tool_handler(
                     final_response = (
                         response_data[0] if len(response_data) == 1 else response_data
                     )
+
+                    # 尝试适配响应数据到预期模型
+                    final_response = adapt_response_to_model(
+                        final_response, ResponseModel, endpoint_name
+                    )
+
                     return final_response
 
                 except McpError as e:
@@ -452,6 +564,12 @@ def get_tool_handler(
                     final_response = (
                         response_data[0] if len(response_data) == 1 else response_data
                     )
+
+                    # 对无参数端点也进行响应适配
+                    final_response = adapt_response_to_model(
+                        final_response, Any, endpoint_name
+                    )
+
                     return final_response
 
                 except McpError as e:
