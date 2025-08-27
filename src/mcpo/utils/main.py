@@ -21,6 +21,9 @@ from mcp.shared.exceptions import McpError
 from pydantic import Field, create_model
 from pydantic.fields import FieldInfo
 
+# 导入响应适配器
+from .response_adapters import AutoResponseAdapter
+
 logger = logging.getLogger(__name__)
 
 MCP_ERROR_TO_HTTP_STATUS = {
@@ -30,7 +33,6 @@ MCP_ERROR_TO_HTTP_STATUS = {
     INVALID_PARAMS: 422,
     INTERNAL_ERROR: 500,
 }
-
 
 def process_tool_response(result: CallToolResult) -> list:
     """Universal response processor for all tool endpoints"""
@@ -52,92 +54,18 @@ def process_tool_response(result: CallToolResult) -> list:
             response.append("Embedded resource not supported yet.")
     return response
 
-
 def smart_response_adapter(response_data, response_model, endpoint_name: str):
     """
-    智能响应适配器：基于类型注解的自动适配 - 方案四
+    智能响应适配器：使用方案四的自动类型推断
     """
-    # 如果响应模型是 Any，直接返回
-    if response_model == Any:
-        return response_data
+    logger.info(f"🔧 [ADAPTER] smart_response_adapter called for {endpoint_name}")
+    logger.info(f"🔧 [ADAPTER] response_data type: {type(response_data)}, response_model: {response_model}")
 
-    if response_data is None:
-        return response_data
+    # 使用 AutoResponseAdapter 进行自动适配
+    result = AutoResponseAdapter.auto_adapt(response_data, response_model, endpoint_name)
 
-    try:
-        # 获取期望类型的信息
-        origin = get_origin(response_model)
-        args = get_args(response_model)
-
-        # 处理 List[T] 类型
-        if origin is list and args:
-            target_item_type = args[0]
-            if isinstance(response_data, list) and response_data:
-                first_item = response_data[0]
-
-                # 如果期望 List[str] 但得到 List[dict]
-                if target_item_type is str and isinstance(first_item, dict):
-                    logger.info(f"Auto-adapting {endpoint_name}: List[dict] -> List[str] ({len(response_data)} items)")
-                    return _convert_dict_list_to_str_list(response_data)
-
-                # 如果期望 List[int] 但得到 List[str]
-                elif target_item_type is int and isinstance(first_item, str):
-                    logger.info(f"Auto-adapting {endpoint_name}: List[str] -> List[int] ({len(response_data)} items)")
-                    return _convert_str_list_to_int_list(response_data)
-
-                # 如果期望 List[float] 但得到 List[str]
-                elif target_item_type is float and isinstance(first_item, str):
-                    logger.info(f"Auto-adapting {endpoint_name}: List[str] -> List[float] ({len(response_data)} items)")
-                    return _convert_str_list_to_float_list(response_data)
-
-                # 通用列表项转换
-                elif not isinstance(first_item, target_item_type):
-                    logger.info(f"Auto-adapting {endpoint_name}: List[{type(first_item).__name__}] -> List[{target_item_type.__name__}] ({len(response_data)} items)")
-                    return convert_list_items(response_data, target_item_type)
-
-        # 处理单个值的转换
-        elif response_model is str and isinstance(response_data, dict):
-            logger.info(f"Auto-adapting {endpoint_name}: dict -> str")
-            return extract_string_from_dict(response_data)
-
-        elif response_model is int and isinstance(response_data, (str, dict)):
-            logger.info(f"Auto-adapting {endpoint_name}: {type(response_data).__name__} -> int")
-            return convert_to_basic_type(response_data, int)
-
-        elif response_model is float and isinstance(response_data, (str, dict)):
-            logger.info(f"Auto-adapting {endpoint_name}: {type(response_data).__name__} -> float")
-            return convert_to_basic_type(response_data, float)
-
-        elif response_model is bool and isinstance(response_data, (str, dict)):
-            logger.info(f"Auto-adapting {endpoint_name}: {type(response_data).__name__} -> bool")
-            return convert_to_basic_type(response_data, bool)
-
-        # 处理 Union 类型
-        elif origin is Union:
-            # 尝试匹配 Union 中的任一类型
-            for arg_type in args:
-                try:
-                    if arg_type == type(response_data):
-                        return response_data
-                except:
-                    continue
-
-        # 如果是 Pydantic 模型，尝试验证
-        elif hasattr(response_model, '__annotations__'):
-            try:
-                # 尝试创建模型实例来验证
-                if isinstance(response_data, dict):
-                    response_model(**response_data)
-                return response_data
-            except Exception as e:
-                logger.debug(f"Pydantic validation failed for {endpoint_name}: {e}, returning raw data")
-                return response_data
-
-        return response_data
-
-    except Exception as e:
-        logger.debug(f"Auto-adaptation failed for {endpoint_name}: {e}, returning raw data")
-        return response_data
+    logger.info(f"🔧 [ADAPTER] {endpoint_name}: adaptation completed")
+    return result
 
 
 def convert_list_items(data_list: list, target_type: type):
