@@ -55,27 +55,62 @@ def process_tool_response(result: CallToolResult) -> list:
 
 def smart_response_adapter(response_data, response_model, endpoint_name: str):
     """
-    智能响应适配器：先尝试直接返回，失败则进行类型转换
+    智能响应适配器：基于类型注解的自动适配 - 方案四
     """
     # 如果响应模型是 Any，直接返回
     if response_model == Any:
         return response_data
 
+    if response_data is None:
+        return response_data
+
     try:
-        # 获取类型信息
+        # 获取期望类型的信息
         origin = get_origin(response_model)
         args = get_args(response_model)
 
-        # 处理泛型类型如 List[str]
+        # 处理 List[T] 类型
         if origin is list and args:
-            expected_item_type = args[0]
-            if isinstance(response_data, list):
-                # 检查列表中的第一个元素是否符合预期类型
-                if response_data and not isinstance(response_data[0], expected_item_type):
-                    # 需要转换
-                    logger.info(
-                        f"Auto-adapting {endpoint_name} response from List[{type(response_data[0]).__name__}] to List[{expected_item_type.__name__}]")
-                    return convert_list_items(response_data, expected_item_type)
+            target_item_type = args[0]
+            if isinstance(response_data, list) and response_data:
+                first_item = response_data[0]
+
+                # 如果期望 List[str] 但得到 List[dict]
+                if target_item_type is str and isinstance(first_item, dict):
+                    logger.info(f"Auto-adapting {endpoint_name}: List[dict] -> List[str] ({len(response_data)} items)")
+                    return _convert_dict_list_to_str_list(response_data)
+
+                # 如果期望 List[int] 但得到 List[str]
+                elif target_item_type is int and isinstance(first_item, str):
+                    logger.info(f"Auto-adapting {endpoint_name}: List[str] -> List[int] ({len(response_data)} items)")
+                    return _convert_str_list_to_int_list(response_data)
+
+                # 如果期望 List[float] 但得到 List[str]
+                elif target_item_type is float and isinstance(first_item, str):
+                    logger.info(f"Auto-adapting {endpoint_name}: List[str] -> List[float] ({len(response_data)} items)")
+                    return _convert_str_list_to_float_list(response_data)
+
+                # 通用列表项转换
+                elif not isinstance(first_item, target_item_type):
+                    logger.info(f"Auto-adapting {endpoint_name}: List[{type(first_item).__name__}] -> List[{target_item_type.__name__}] ({len(response_data)} items)")
+                    return convert_list_items(response_data, target_item_type)
+
+        # 处理单个值的转换
+        elif response_model is str and isinstance(response_data, dict):
+            logger.info(f"Auto-adapting {endpoint_name}: dict -> str")
+            return extract_string_from_dict(response_data)
+
+        elif response_model is int and isinstance(response_data, (str, dict)):
+            logger.info(f"Auto-adapting {endpoint_name}: {type(response_data).__name__} -> int")
+            return convert_to_basic_type(response_data, int)
+
+        elif response_model is float and isinstance(response_data, (str, dict)):
+            logger.info(f"Auto-adapting {endpoint_name}: {type(response_data).__name__} -> float")
+            return convert_to_basic_type(response_data, float)
+
+        elif response_model is bool and isinstance(response_data, (str, dict)):
+            logger.info(f"Auto-adapting {endpoint_name}: {type(response_data).__name__} -> bool")
+            return convert_to_basic_type(response_data, bool)
 
         # 处理 Union 类型
         elif origin is Union:
@@ -98,17 +133,10 @@ def smart_response_adapter(response_data, response_model, endpoint_name: str):
                 logger.debug(f"Pydantic validation failed for {endpoint_name}: {e}, returning raw data")
                 return response_data
 
-        # 处理基本类型
-        elif response_model in (str, int, float, bool):
-            if not isinstance(response_data, response_model):
-                logger.info(
-                    f"Auto-converting {endpoint_name} response from {type(response_data).__name__} to {response_model.__name__}")
-                return convert_to_basic_type(response_data, response_model)
-
         return response_data
 
     except Exception as e:
-        logger.debug(f"Response adaptation failed for {endpoint_name}: {e}, returning raw data")
+        logger.debug(f"Auto-adaptation failed for {endpoint_name}: {e}, returning raw data")
         return response_data
 
 
@@ -127,12 +155,17 @@ def convert_list_items(data_list: list, target_type: type):
 
 def convert_to_basic_type(item, target_type: type):
     """
-    将项目转换为基本类型
+    将项目转换为基本类型 - 增强版本，支持更智能的转换
     """
     try:
         if target_type == str:
             if isinstance(item, dict):
                 return extract_string_from_dict(item)
+            elif isinstance(item, (list, tuple)):
+                # 如果是列表或元组，尝试提取第一个有意义的元素
+                if item:
+                    return convert_to_basic_type(item[0], str)
+                return "[]"
             else:
                 return str(item)
         elif target_type == int:
@@ -141,16 +174,40 @@ def convert_to_basic_type(item, target_type: type):
                 import re
                 numbers = re.findall(r'\d+', item)
                 return int(numbers[0]) if numbers else 0
+            elif isinstance(item, dict):
+                # 从字典中尝试提取数字字段
+                for key in ['id', 'number', 'count', 'index']:
+                    if key in item and isinstance(item[key], (int, str)):
+                        try:
+                            return int(item[key])
+                        except (ValueError, TypeError):
+                            continue
+                return 0
             return int(item) if isinstance(item, (int, float)) else 0
         elif target_type == float:
             if isinstance(item, str):
                 import re
                 numbers = re.findall(r'\d+\.?\d*', item)
                 return float(numbers[0]) if numbers else 0.0
+            elif isinstance(item, dict):
+                # 从字典中尝试提取数字字段
+                for key in ['value', 'amount', 'price', 'score']:
+                    if key in item and isinstance(item[key], (int, float, str)):
+                        try:
+                            return float(item[key])
+                        except (ValueError, TypeError):
+                            continue
+                return 0.0
             return float(item) if isinstance(item, (int, float)) else 0.0
         elif target_type == bool:
             if isinstance(item, str):
-                return item.lower() in ('true', '1', 'yes', 'on')
+                return item.lower() in ('true', '1', 'yes', 'on', 'enabled', 'active')
+            elif isinstance(item, dict):
+                # 从字典中尝试提取布尔字段
+                for key in ['enabled', 'active', 'valid', 'success', 'status']:
+                    if key in item:
+                        return bool(item[key])
+                return bool(item)  # 非空字典为 True
             return bool(item)
         else:
             return item
@@ -635,3 +692,42 @@ def get_tool_handler(
         tool_handler = make_endpoint_func_no_args(endpoint_name, session)
 
     return tool_handler
+
+
+def _convert_dict_list_to_str_list(dict_list: List[dict]) -> List[str]:
+    """将字典列表转换为字符串列表"""
+    result = []
+    for item in dict_list:
+        if isinstance(item, dict):
+            result.append(extract_string_from_dict(item))
+        else:
+            result.append(str(item))
+    return result
+
+
+def _convert_str_list_to_int_list(str_list: List[str]) -> List[int]:
+    """将字符串列表转换为整数列表"""
+    result = []
+    for item in str_list:
+        try:
+            result.append(int(item))
+        except (ValueError, TypeError):
+            # 尝试从字符串中提取数字
+            import re
+            numbers = re.findall(r'\d+', str(item))
+            result.append(int(numbers[0]) if numbers else 0)
+    return result
+
+
+def _convert_str_list_to_float_list(str_list: List[str]) -> List[float]:
+    """将字符串列表转换为浮点数列表"""
+    result = []
+    for item in str_list:
+        try:
+            result.append(float(item))
+        except (ValueError, TypeError):
+            # 尝试从字符串中提取数字
+            import re
+            numbers = re.findall(r'\d+\.?\d*', str(item))
+            result.append(float(numbers[0]) if numbers else 0.0)
+    return result
