@@ -2,7 +2,7 @@ import json
 import traceback
 import os
 import logging
-from typing import Any, Dict, ForwardRef, List, Optional, Type, Union
+from typing import Any, Dict, ForwardRef, List, Optional, Type, Union, get_origin, get_args
 
 from fastapi import HTTPException
 
@@ -53,105 +53,147 @@ def process_tool_response(result: CallToolResult) -> list:
     return response
 
 
-def adapt_response_to_model(response_data, response_model, endpoint_name):
+def smart_response_adapter(response_data, response_model, endpoint_name: str):
     """
-    尝试将响应数据适配到预期的模型格式
-
-    Args:
-        response_data: 实际的响应数据
-        response_model: 预期的响应模型
-        endpoint_name: 端点名称
-
-    Returns:
-        适配后的响应数据
+    智能响应适配器：先尝试直接返回，失败则进行类型转换
     """
     # 如果响应模型是 Any，直接返回
     if response_model == Any:
         return response_data
 
     try:
-        # 获取模型的类型信息
-        model_origin = getattr(response_model, '__origin__', None)
-        model_args = getattr(response_model, '__args__', ())
+        # 获取类型信息
+        origin = get_origin(response_model)
+        args = get_args(response_model)
 
-        # 处理 List[str] 类型
-        if model_origin is list and len(model_args) == 1 and model_args[0] is str:
+        # 处理泛型类型如 List[str]
+        if origin is list and args:
+            expected_item_type = args[0]
             if isinstance(response_data, list):
-                adapted_list = []
-                for item in response_data:
-                    if isinstance(item, dict):
-                        # 智能提取字符串表示
-                        if 'name' in item:
-                            adapted_list.append(item['name'])
-                        elif 'fullname' in item:
-                            adapted_list.append(item['fullname'])
-                        elif 'id' in item:
-                            adapted_list.append(str(item['id']))
-                        elif 'title' in item:
-                            adapted_list.append(item['title'])
-                        else:
-                            # 尝试找到第一个字符串值
-                            string_values = [v for v in item.values() if isinstance(v, str)]
-                            if string_values:
-                                adapted_list.append(string_values[0])
-                            else:
-                                # 使用 JSON 字符串作为 fallback
-                                adapted_list.append(json.dumps(item, ensure_ascii=False))
-                    else:
-                        adapted_list.append(str(item))
+                # 检查列表中的第一个元素是否符合预期类型
+                if response_data and not isinstance(response_data[0], expected_item_type):
+                    # 需要转换
+                    logger.info(
+                        f"Auto-adapting {endpoint_name} response from List[{type(response_data[0]).__name__}] to List[{expected_item_type.__name__}]")
+                    return convert_list_items(response_data, expected_item_type)
 
-                logger.info(f"Adapted {endpoint_name} response from List[dict] to List[str]: {len(adapted_list)} items")
-                return adapted_list
+        # 处理 Union 类型
+        elif origin is Union:
+            # 尝试匹配 Union 中的任一类型
+            for arg_type in args:
+                try:
+                    if arg_type == type(response_data):
+                        return response_data
+                except:
+                    continue
 
-        # 处理 List[dict] 类型 - 保持原样
-        elif model_origin is list and len(model_args) == 1:
-            if isinstance(response_data, list):
-                return response_data
-
-        # 处理单个字符串类型
-        elif response_model is str:
-            if isinstance(response_data, dict):
-                # 尝试提取主要字符串字段
-                if 'name' in response_data:
-                    return response_data['name']
-                elif 'title' in response_data:
-                    return response_data['title']
-                elif 'message' in response_data:
-                    return response_data['message']
-                else:
-                    return json.dumps(response_data, ensure_ascii=False)
-            else:
-                return str(response_data)
-
-        # 处理单个字典类型
+        # 如果是 Pydantic 模型，尝试验证
         elif hasattr(response_model, '__annotations__'):
-            # 这是一个 Pydantic 模型
-            if isinstance(response_data, dict):
+            try:
+                # 尝试创建模型实例来验证
+                if isinstance(response_data, dict):
+                    response_model(**response_data)
+                return response_data
+            except Exception as e:
+                logger.debug(f"Pydantic validation failed for {endpoint_name}: {e}, returning raw data")
                 return response_data
 
-        # 针对特定端点的特殊处理
-        if endpoint_name == "list_jobs" and isinstance(response_data, list):
-            # Jenkins list_jobs 特殊处理
-            adapted_list = []
-            for item in response_data:
-                if isinstance(item, dict):
-                    if 'name' in item:
-                        adapted_list.append(item['name'])
-                    elif 'fullname' in item:
-                        adapted_list.append(item['fullname'])
-                    else:
-                        adapted_list.append(json.dumps(item, ensure_ascii=False))
-                else:
-                    adapted_list.append(str(item))
-            logger.info(f"Applied Jenkins-specific adaptation for {endpoint_name}: {len(adapted_list)} jobs")
-            return adapted_list
+        # 处理基本类型
+        elif response_model in (str, int, float, bool):
+            if not isinstance(response_data, response_model):
+                logger.info(
+                    f"Auto-converting {endpoint_name} response from {type(response_data).__name__} to {response_model.__name__}")
+                return convert_to_basic_type(response_data, response_model)
+
+        return response_data
 
     except Exception as e:
-        logger.warning(f"Failed to adapt response for {endpoint_name}: {e}")
+        logger.debug(f"Response adaptation failed for {endpoint_name}: {e}, returning raw data")
+        return response_data
 
-    # 如果适配失败，返回原始数据
-    logger.debug(f"No adaptation applied for {endpoint_name}, returning original data")
-    return response_data
+
+def convert_list_items(data_list: list, target_type: type):
+    """
+    转换列表中的项目到目标类型
+    """
+    converted_list = []
+
+    for item in data_list:
+        converted_item = convert_to_basic_type(item, target_type)
+        converted_list.append(converted_item)
+
+    return converted_list
+
+
+def convert_to_basic_type(item, target_type: type):
+    """
+    将项目转换为基本类型
+    """
+    try:
+        if target_type == str:
+            if isinstance(item, dict):
+                return extract_string_from_dict(item)
+            else:
+                return str(item)
+        elif target_type == int:
+            if isinstance(item, str):
+                # 尝试从字符串中提取数字
+                import re
+                numbers = re.findall(r'\d+', item)
+                return int(numbers[0]) if numbers else 0
+            return int(item) if isinstance(item, (int, float)) else 0
+        elif target_type == float:
+            if isinstance(item, str):
+                import re
+                numbers = re.findall(r'\d+\.?\d*', item)
+                return float(numbers[0]) if numbers else 0.0
+            return float(item) if isinstance(item, (int, float)) else 0.0
+        elif target_type == bool:
+            if isinstance(item, str):
+                return item.lower() in ('true', '1', 'yes', 'on')
+            return bool(item)
+        else:
+            return item
+    except (ValueError, TypeError):
+        # 如果转换失败，返回默认值
+        if target_type == str:
+            return str(item)
+        elif target_type == int:
+            return 0
+        elif target_type == float:
+            return 0.0
+        elif target_type == bool:
+            return False
+        else:
+            return item
+
+
+def extract_string_from_dict(item_dict: dict) -> str:
+    """
+    从字典中智能提取字符串表示
+    """
+    # 优先级顺序的字段名
+    priority_fields = ['name', 'title', 'fullname', 'id', 'key', 'label', 'display_name', 'description']
+
+    for field in priority_fields:
+        if field in item_dict and isinstance(item_dict[field], str) and item_dict[field].strip():
+            return item_dict[field]
+
+    # 如果没有找到优先字段，寻找第一个非空字符串值
+    for key, value in item_dict.items():
+        if isinstance(value, str) and value.strip():
+            return value
+
+    # 寻找第一个数字并转为字符串
+    for key, value in item_dict.items():
+        if isinstance(value, (int, float)):
+            return str(value)
+
+    # 最后的备选方案：JSON 字符串
+    try:
+        return json.dumps(item_dict, ensure_ascii=False, separators=(',', ':'))
+    except:
+        return str(item_dict)
 
 
 def name_needs_alias(name: str) -> bool:
@@ -213,7 +255,7 @@ def _process_schema_property(
                 # TODO: Find the exact type hint for the $ref.
                 return Any, Field(default=None, description="")
         original_ref = ref
-        ref = ref.split("/")[-1]
+        ref = ref.split
         if schema_defs is None or ref not in schema_defs:
             logger.warning(f"[{server_name}] Custom field '{ref}' not found in schema definitions.")
             logger.debug(f"[{server_name}] Original reference: {original_ref}")
@@ -465,28 +507,25 @@ def get_tool_handler(
     if form_model_fields:
         FormModel = create_model(f"{endpoint_name}_form_model", **form_model_fields)
 
-        # 创建响应模型，但允许运行时适配
+        # 总是尝试创建响应模型
+        ResponseModel = Any
         if response_model_fields:
             try:
                 ResponseModel = create_model(f"{endpoint_name}_response_model", **response_model_fields)
             except Exception as e:
                 logger.warning(f"Failed to create response model for {endpoint_name}: {e}")
-                ResponseModel = Any
-        else:
-            ResponseModel = Any
 
-        def make_endpoint_func(
-                endpoint_name: str, FormModel, session: ClientSession
-        ):  # Parameterized endpoint
+        def make_endpoint_func(endpoint_name: str, FormModel, session: ClientSession):
             async def tool(form_data: FormModel) -> ResponseModel:
                 args = form_data.model_dump(exclude_none=True, by_alias=True)
                 print(f"[Worker {worker_id}] Calling endpoint: {endpoint_name}, with args: {args}")
+
                 try:
                     result = await session.call_tool(endpoint_name, arguments=args)
 
                     if result.isError:
                         error_message = "Unknown tool execution error"
-                        error_data = None  # Initialize error_data
+                        error_data = None
                         if result.content:
                             if isinstance(result.content[0], types.TextContent):
                                 error_message = result.content[0].text
@@ -503,10 +542,8 @@ def get_tool_handler(
                         response_data[0] if len(response_data) == 1 else response_data
                     )
 
-                    # 尝试适配响应数据到预期模型
-                    final_response = adapt_response_to_model(
-                        final_response, ResponseModel, endpoint_name
-                    )
+                    # 智能响应适配：尝试让 Pydantic 验证，失败则自动转换
+                    final_response = smart_response_adapter(final_response, ResponseModel, endpoint_name)
 
                     return final_response
 
@@ -565,10 +602,8 @@ def get_tool_handler(
                         response_data[0] if len(response_data) == 1 else response_data
                     )
 
-                    # 对无参数端点也进行响应适配
-                    final_response = adapt_response_to_model(
-                        final_response, Any, endpoint_name
-                    )
+                    # 对无参数端点也进行智能响应适配
+                    final_response = smart_response_adapter(final_response, Any, endpoint_name)
 
                     return final_response
 
